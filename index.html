@@ -1,0 +1,496 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>Mirrored Gun Target Game</title>
+<style>
+  :root { --ui-bg: #ffffffcc; --panel:#fff; --muted:#666; }
+  html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#87CEEB;}
+  canvas{display:block; width:100vw; height:100vh; touch-action:none;}
+  .ui {
+    position: absolute; left:12px; top:12px; z-index:30;
+    background:var(--ui-bg); padding:8px 12px; border-radius:10px;
+    backdrop-filter: blur(6px); box-shadow:0 6px 18px rgba(0,0,0,0.12);
+  }
+  .ui.topright{left:auto; right:12px;}
+  button{background:#222;color:#fff;border:0;padding:7px 10px;border-radius:8px;cursor:pointer}
+  .small{padding:6px 8px;font-size:13px}
+  .panel {
+    position: absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:var(--panel); padding:16px; border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,0.18);
+    z-index:90; max-width:92vw; width:420px; display:none;
+  }
+  .panel.show{display:block;}
+  .shop-grid{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:8px;}
+  .swatch{width:80px;height:80px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-weight:700}
+  .muted{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<div class="ui">
+  <div>Score: <strong id="scoreDisplay">0</strong></div>
+  <div class="muted">High: <span id="hiDisplay">0</span></div>
+</div>
+
+<div class="ui topright">
+  <div style="display:flex;gap:8px;align-items:center">
+    <div>Coins: <strong id="coinsDisplay">0</strong></div>
+    <button id="shopBtn" class="small">Shop</button>
+  </div>
+  <div style="margin-top:8px">Time: <strong id="timerDisplay">30</strong>s</div>
+</div>
+
+<!-- Panel: Shop / Game Over -->
+<div id="panel" class="panel" role="dialog" aria-hidden="true">
+  <div id="shopContent">
+    <div style="text-align:center">
+      <h2>Bullet Shop</h2>
+      <div class="muted">Buy or select bullet colors — everything is saved locally.</div>
+    </div>
+    <div class="shop-grid" id="shopGrid"></div>
+    <div style="text-align:center;margin-top:12px">
+      <button id="closeShop" class="small">Close</button>
+    </div>
+  </div>
+
+  <div id="gameOverContent" style="display:none;text-align:center">
+    <h2>Time's Up!</h2>
+    <p>Your score: <strong id="finalScore">0</strong></p>
+    <p>Coins earned: <strong id="earnedCoins">0</strong></p>
+    <div style="margin-top:10px">
+      <button id="restartBtn">Play Again</button>
+      <button id="toShopFromOver" class="small">Open Shop</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===================== Setup & State ===================== */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+const LS = {
+  coins: 'mg_coins_v1',
+  unlocked: 'mg_unlocked_v1',
+  selected: 'mg_selected_v1',
+  high: 'mg_high_v1'
+};
+
+const shopItems = [
+  { id:'black', label:'Black', color:'#111', price:0 },
+  { id:'red', label:'Crimson', color:'#d33', price:5 },
+  { id:'blue', label:'Ocean', color:'#06f', price:10 },
+  { id:'gold', label:'Gold', color:'#d4af37', price:25 }
+];
+
+let state = {
+  score: 0,
+  bullets: [],
+  dragging: false,
+  startX:0, startY:0,
+  gunX: 120,
+  gunY: window.innerHeight/2,
+  targetX: null,
+  targetY: window.innerHeight/2,
+  outerR: 100,
+  middleR: 60,
+  bullR: 30,
+  timeLeft: 30,
+  running: true,
+  coins: 0,
+  unlocked: ['black'],
+  selectedColor: 'black',
+  highScore: 0,
+  gameStartTimestamp: Date.now()
+};
+
+function loadStorage(){
+  try {
+    const c = parseInt(localStorage.getItem(LS.coins));
+    if(!Number.isNaN(c)) state.coins = c;
+    const un = JSON.parse(localStorage.getItem(LS.unlocked));
+    if(Array.isArray(un) && un.length) state.unlocked = un;
+    const sel = localStorage.getItem(LS.selected);
+    if(sel) state.selectedColor = sel;
+    const hi = parseInt(localStorage.getItem(LS.high));
+    if(!Number.isNaN(hi)) state.highScore = hi;
+  } catch(e){ console.warn('storage load err', e); }
+}
+function saveStorage(){
+  try {
+    localStorage.setItem(LS.coins, String(state.coins));
+    localStorage.setItem(LS.unlocked, JSON.stringify(state.unlocked));
+    localStorage.setItem(LS.selected, state.selectedColor);
+    localStorage.setItem(LS.high, String(state.highScore));
+  } catch(e){ console.warn('storage save err', e); }
+}
+loadStorage();
+
+/* UI refs */
+const scoreDisplay = document.getElementById('scoreDisplay');
+const coinsDisplay = document.getElementById('coinsDisplay');
+const hiDisplay = document.getElementById('hiDisplay');
+const timerDisplay = document.getElementById('timerDisplay');
+
+function uiUpdate(){
+  scoreDisplay.textContent = state.score;
+  coinsDisplay.textContent = state.coins;
+  hiDisplay.textContent = state.highScore;
+  timerDisplay.textContent = Math.max(0, Math.ceil(state.timeLeft));
+}
+uiUpdate();
+
+/* ===================== Shop UI ===================== */
+const shopBtn = document.getElementById('shopBtn');
+const panel = document.getElementById('panel');
+const shopGrid = document.getElementById('shopGrid');
+const closeShop = document.getElementById('closeShop');
+const shopContent = document.getElementById('shopContent');
+const gameOverContent = document.getElementById('gameOverContent');
+const finalScore = document.getElementById('finalScore');
+const earnedCoinsEl = document.getElementById('earnedCoins');
+const restartBtn = document.getElementById('restartBtn');
+const toShopFromOver = document.getElementById('toShopFromOver');
+
+function openShop(){
+  panel.classList.add('show');
+  shopContent.style.display = 'block';
+  gameOverContent.style.display = 'none';
+  renderShop();
+  panel.setAttribute('aria-hidden','false');
+}
+function closePanel(){ panel.classList.remove('show'); panel.setAttribute('aria-hidden','true'); }
+shopBtn.addEventListener('click', openShop);
+closeShop.addEventListener('click', closePanel);
+toShopFromOver.addEventListener('click', openShop);
+restartBtn.addEventListener('click', ()=>{ resetGame(); closePanel(); });
+
+function renderShop(){
+  shopGrid.innerHTML = '';
+  shopItems.forEach(item=>{
+    const card = document.createElement('div');
+    card.style.display='flex';
+    card.style.flexDirection='column';
+    card.style.alignItems='center';
+    card.style.width='120px';
+    const sw = document.createElement('div');
+    sw.className='swatch';
+    sw.style.background = item.color;
+    sw.style.width='100px';
+    sw.style.height='70px';
+    sw.style.borderRadius='8px';
+    sw.style.display='flex';
+    sw.style.alignItems='center';
+    sw.style.justifyContent='center';
+    sw.style.color='#fff';
+    sw.textContent = item.label;
+    const btn = document.createElement('button');
+    btn.className='small';
+    btn.style.marginTop='8px';
+    const unlocked = state.unlocked.includes(item.id);
+    if(unlocked){
+      btn.textContent = state.selectedColor === item.id ? 'Selected' : 'Select';
+      btn.disabled = (state.selectedColor === item.id);
+      btn.addEventListener('click', ()=>{
+        state.selectedColor = item.id;
+        saveStorage();
+        renderShop();
+      });
+    } else {
+      btn.textContent = `Buy ${item.price}¢`;
+      btn.addEventListener('click', ()=>{
+        if(state.coins >= item.price){
+          state.coins -= item.price;
+          state.unlocked.push(item.id);
+          state.selectedColor = item.id;
+          saveStorage();
+          uiUpdate();
+          renderShop();
+        } else {
+          alert('Not enough coins.');
+        }
+      });
+    }
+    card.appendChild(sw);
+    card.appendChild(btn);
+    shopGrid.appendChild(card);
+  });
+}
+
+/* ===================== Drawing (Mirrored gun) ===================== */
+function drawGun(){
+  const x = state.gunX, y = state.gunY;
+  ctx.save();
+  ctx.translate(x, y);
+  // Barrel (pointing right)
+  ctx.fillStyle = "#333";
+  ctx.fillRect(0, -8, 60, 16);      // main barrel
+  ctx.fillRect(52, -12, 8, 8);      // sight top
+  ctx.fillRect(52, 4, 8, 8);        // sight bottom
+  // Muzzle glow
+  ctx.fillStyle = "#222";
+  ctx.fillRect(60, -6, 10, 12);
+  // Handle (behind barrel)
+  ctx.fillStyle = "#2b2b2b";
+  ctx.fillRect(-14, -16, 12, 32);
+  // small decoration
+  ctx.fillStyle = "#111";
+  ctx.fillRect(-6, -6, 4, 12);
+  ctx.restore();
+}
+
+/* Aim indicator */
+function drawAimLine(pointerX, pointerY){
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8,6]);
+  ctx.strokeStyle = "#0008";
+  ctx.beginPath();
+  ctx.moveTo(state.gunX + 60, state.gunY);
+  ctx.lineTo(pointerX, pointerY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/* ===================== Bullets ===================== */
+function makeBullet(vx, vy){
+  return {
+    x: state.gunX + 62,
+    y: state.gunY,
+    vx: vx, vy: vy,
+    stuck: false,
+    color: shopItems.find(i=>i.id===state.selectedColor)?.color || '#111'
+  };
+}
+function drawBullet(b){
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.beginPath();
+  ctx.arc(0, 0, 6, 0, Math.PI*2);
+  ctx.fillStyle = b.color;
+  ctx.fill();
+  // small highlight
+  ctx.beginPath();
+  ctx.arc(-2, -2, 1.6, 0, Math.PI*2);
+  ctx.fillStyle = "#ffffff66";
+  ctx.fill();
+  ctx.restore();
+}
+
+/* ===================== Target ===================== */
+let targetBaseY = canvas.height/2;
+let targetAmp = Math.min(120, canvas.height/3);
+let targetSpeed = 1.2;
+
+function updateTarget(){
+  const t = (Date.now() - state.gameStartTimestamp)/1000;
+  state.targetY = targetBaseY + Math.sin(t * targetSpeed) * targetAmp;
+  state.targetX = canvas.width - 220;
+}
+
+/* ===================== Game Update / Draw ===================== */
+let lastTime = performance.now();
+
+function update(dt){
+  if(!state.running) return;
+  updateTarget();
+
+  // Move bullets (straight, no gravity)
+  for(const b of state.bullets){
+    if(b.stuck) continue;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    // collision
+    const dx = b.x - state.targetX;
+    const dy = b.y - state.targetY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if(!b.stuck && dist <= state.outerR){
+      b.stuck = true;
+      // freeze bullet at impact point
+      // award points
+      if(dist <= state.bullR) state.score += 50;
+      else if(dist <= state.middleR) state.score += 25;
+      else state.score += 10;
+      uiUpdate();
+    }
+  }
+
+  // Timer
+  state.timeLeft -= dt/1000;
+  if(state.timeLeft <= 0 && state.running){
+    endGame();
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // ground
+  ctx.fillStyle = '#3fa63f';
+  ctx.fillRect(0, canvas.height - 80, canvas.width, 80);
+
+  // target
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.outerR, 0, Math.PI*2);
+  ctx.fillStyle = '#b22222'; ctx.fill();
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.middleR, 0, Math.PI*2);
+  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.bullR, 0, Math.PI*2);
+  ctx.fillStyle = '#ffd700'; ctx.fill();
+  ctx.restore();
+
+  // bullets
+  for(const b of state.bullets) drawBullet(b);
+
+  // draw gun
+  drawGun();
+
+  // draw aim line if dragging
+  if(state.dragging && state.pointerX != null){
+    drawAimLine(state.pointerX, state.pointerY);
+    // small reticle at pointer
+    ctx.beginPath();
+    ctx.arc(state.pointerX, state.pointerY, 8, 0, Math.PI*2);
+    ctx.strokeStyle = "#0005";
+    ctx.stroke();
+  }
+}
+
+/* ===================== Input: pointer (works for touch & mouse) ===================== */
+function getPointerPos(e){
+  const r = canvas.getBoundingClientRect();
+  if(e.touches) return {x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top};
+  return {x: e.clientX - r.left, y: e.clientY - r.top};
+}
+
+canvas.addEventListener('pointerdown', (e)=>{
+  if(!state.running) return;
+  state.dragging = true;
+  const p = getPointerPos(e);
+  state.startX = p.x;
+  state.startY = p.y;
+  state.pointerX = p.x;
+  state.pointerY = p.y;
+});
+canvas.addEventListener('pointermove', (e)=>{
+  if(!state.dragging) return;
+  const p = getPointerPos(e);
+  state.pointerX = p.x;
+  state.pointerY = p.y;
+});
+canvas.addEventListener('pointerup', (e)=>{
+  if(!state.dragging || !state.running) return;
+  state.dragging = false;
+  const r = canvas.getBoundingClientRect();
+  const endX = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - r.left;
+  const endY = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - r.top;
+
+  // direction = end - start (you drag in direction you want the bullet to travel)
+  const dx = endX - state.startX;
+  const dy = endY - state.startY;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+
+  const minDrag = 6; // tiny threshold to avoid accidental taps
+  if(dist < minDrag) {
+    state.pointerX = null;
+    state.pointerY = null;
+    return;
+  }
+
+  // tuning: scale distance -> speed, cap max speed
+  const scale = 0.03;            // lower -> slower
+  const maxSpeed = 1.2;         // pixels per ms
+  const speed = Math.min(maxSpeed, dist * scale);
+  const angle = Math.atan2(dy, dx);
+  const vx = Math.cos(angle) * speed;
+  const vy = Math.sin(angle) * speed;
+
+  state.bullets.push(makeBullet(vx, vy));
+  state.pointerX = null;
+  state.pointerY = null;
+});
+
+canvas.addEventListener('pointercancel', ()=>{ state.dragging = false; state.pointerX = null; state.pointerY = null; });
+
+/* Quick tap on left side moves gun vertically (mobile nicety) */
+canvas.addEventListener('click', (e)=>{
+  const p = getPointerPos(e);
+  if(p.x < canvas.width * 0.25){
+    state.gunY = p.y;
+  }
+});
+
+/* ===================== Game loop ===================== */
+function gameLoop(now){
+  const dt = Math.min(40, now - lastTime); // ms
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+/* ===================== Start / End / Reset ===================== */
+function startGame(){
+  state.score = 0;
+  state.bullets = [];
+  state.timeLeft = 30;
+  state.running = true;
+  state.gameStartTimestamp = Date.now();
+  state.gunY = canvas.height/2;
+  targetBaseY = canvas.height/2;
+  uiUpdate();
+}
+function endGame(){
+  state.running = false;
+  const earned = Math.floor(state.score / 10);
+  state.coins += earned;
+  if(state.score > state.highScore) state.highScore = state.score;
+  saveStorage();
+  // show panel
+  finalScore.textContent = state.score;
+  earnedCoinsEl.textContent = earned;
+  shopContent.style.display = 'none';
+  gameOverContent.style.display = 'block';
+  panel.classList.add('show');
+  uiUpdate();
+}
+function resetGame(){
+  startGame();
+}
+
+/* ===================== Init ===================== */
+startGame();
+requestAnimationFrame(gameLoop);
+
+/* periodic save */
+setInterval(saveStorage, 3000);
+window.addEventListener('beforeunload', saveStorage);
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') saveStorage(); });
+
+/* keyboard shortcuts */
+document.addEventListener('keydown', (e)=>{
+  if(e.key==='r' || e.key==='R') resetGame();
+  if(e.key==='s' || e.key==='S') openShop();
+});
+
+/* render shop once */
+renderShop();
+uiUpdate();
+</script>
+</body>
+</html>
