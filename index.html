@@ -1,0 +1,502 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta charset="utf-8" />
+<title>Archery Target — Shop & Save</title>
+<style>
+  :root{--ui-bg:#ffffffaa;--panel:#ffffff;--accent:#222;}
+  html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#87CEEB;}
+  #gameCanvas{display:block;width:100vw;height:100vh;touch-action:none;}
+  .ui {
+    position: absolute; left:12px; top:12px; z-index:20;
+    background:var(--ui-bg); padding:8px 12px; border-radius:10px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+  }
+  .ui.topright { left:auto; right:12px; }
+  .panel {
+    position: absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:var(--panel); padding:16px; border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,0.18);
+    z-index:50; max-width:92vw; width:420px; display:none;
+  }
+  .panel.show{display:block;}
+  .shop-grid{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:8px;}
+  .swatch{width:80px;height:80px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-weight:700}
+  button {padding:8px 10px;border-radius:8px;border:0;background:#222;color:#fff;cursor:pointer}
+  .muted {opacity:0.7;font-size:13px}
+  .small {font-size:13px;padding:6px 8px}
+  .top-row {display:flex;gap:8px;align-items:center}
+  .center {text-align:center}
+  .footer {margin-top:12px;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<div class="ui">
+  <div>Score: <span id="scoreDisplay">0</span></div>
+  <div class="muted">High: <span id="hiDisplay">0</span></div>
+</div>
+
+<div class="ui topright">
+  <div class="top-row">
+    <div>Coins: <span id="coinsDisplay">0</span></div>
+    <button id="shopBtn" class="small">Shop</button>
+  </div>
+  <div style="margin-top:8px;">Time: <strong id="timerDisplay">30</strong>s</div>
+</div>
+
+<!-- Shop / Game Over Panel -->
+<div id="panel" class="panel" role="dialog" aria-hidden="true">
+  <div id="panelContent">
+    <div id="shopContent">
+      <div class="center">
+        <h2>Bullet Shop</h2>
+        <div class="muted">Select or buy a bullet color. Purchases are saved locally.</div>
+      </div>
+      <div class="shop-grid" id="shopGrid"></div>
+      <div class="footer">
+        <button id="closeShop" class="small">Close</button>
+      </div>
+    </div>
+
+    <div id="gameOverContent" style="display:none" class="center">
+      <h2>Time's Up!</h2>
+      <p>Your score: <strong id="finalScore">0</strong></p>
+      <p>Coins earned: <strong id="earnedCoins">0</strong></p>
+      <div style="margin-top:10px">
+        <button id="restartBtn">Play Again</button>
+        <button id="toShopFromOver" class="small">Open Shop</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- Config & State ---------- */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+let state = {
+  score: 0,
+  arrows: [],
+  dragging: false,
+  startX: 0, startY: 0,
+  bowX: 150, // left side
+  bowY: window.innerHeight/2,
+  targetX: null,
+  baseTargetXOffset: 200,
+  outerR: 100,
+  middleR: 60,
+  bullR: 30,
+  timeLeft: 30,
+  running: true,
+  coins: 0,
+  unlocked: ['black'], // default unlocked colors
+  selectedColor: 'black',
+  highScore: 0,
+  gameStartTimestamp: null
+};
+
+/* Local Storage keys */
+const LS_KEYS = {
+  coins: 'arch_coins_v1',
+  unlocked: 'arch_unlocked_v1',
+  selected: 'arch_selected_v1',
+  high: 'arch_high_v1'
+};
+
+function loadFromStorage(){
+  try {
+    const c = parseInt(localStorage.getItem(LS_KEYS.coins));
+    if(!Number.isNaN(c)) state.coins = c;
+    const un = JSON.parse(localStorage.getItem(LS_KEYS.unlocked));
+    if(Array.isArray(un) && un.length) state.unlocked = un;
+    const sel = localStorage.getItem(LS_KEYS.selected);
+    if(sel) state.selectedColor = sel;
+    const hi = parseInt(localStorage.getItem(LS_KEYS.high));
+    if(!Number.isNaN(hi)) state.highScore = hi;
+  } catch(e){ console.warn('load err', e); }
+}
+function saveToStorage(){
+  try {
+    localStorage.setItem(LS_KEYS.coins, String(state.coins));
+    localStorage.setItem(LS_KEYS.unlocked, JSON.stringify(state.unlocked));
+    localStorage.setItem(LS_KEYS.selected, state.selectedColor);
+    localStorage.setItem(LS_KEYS.high, String(state.highScore));
+  } catch(e){ console.warn('save err', e); }
+}
+loadFromStorage();
+
+/* ---------- UI Bindings ---------- */
+const scoreDisplay = document.getElementById('scoreDisplay');
+const coinsDisplay = document.getElementById('coinsDisplay');
+const hiDisplay = document.getElementById('hiDisplay');
+const timerDisplay = document.getElementById('timerDisplay');
+
+function uiUpdate(){
+  scoreDisplay.textContent = state.score;
+  coinsDisplay.textContent = state.coins;
+  hiDisplay.textContent = state.highScore;
+  timerDisplay.textContent = Math.ceil(state.timeLeft);
+}
+uiUpdate();
+
+/* Shop data (simple) */
+const shopItems = [
+  { id:'black', label:'Black', color:'#111', price:0 },
+  { id:'red', label:'Crimson', color:'#d33', price:5 },
+  { id:'blue', label:'Ocean', color:'#00a', price:10 },
+  { id:'gold', label:'Gold', color:'#d4af37', price:25 },
+];
+
+const shopBtn = document.getElementById('shopBtn');
+const panel = document.getElementById('panel');
+const shopGrid = document.getElementById('shopGrid');
+const closeShop = document.getElementById('closeShop');
+const panelContent = document.getElementById('panelContent');
+const shopContent = document.getElementById('shopContent');
+const gameOverContent = document.getElementById('gameOverContent');
+const finalScore = document.getElementById('finalScore');
+const earnedCoinsEl = document.getElementById('earnedCoins');
+const restartBtn = document.getElementById('restartBtn');
+const toShopFromOver = document.getElementById('toShopFromOver');
+
+function openShop(){
+  panel.classList.add('show');
+  shopContent.style.display = 'block';
+  gameOverContent.style.display = 'none';
+  renderShop();
+  panel.setAttribute('aria-hidden','false');
+}
+function closePanel(){ panel.classList.remove('show'); panel.setAttribute('aria-hidden','true'); }
+shopBtn.addEventListener('click', openShop);
+closeShop.addEventListener('click', closePanel);
+
+toShopFromOver.addEventListener('click', openShop);
+restartBtn.addEventListener('click', ()=>{ resetGame(); closePanel(); });
+
+function renderShop(){
+  shopGrid.innerHTML = '';
+  shopItems.forEach(item=>{
+    const div = document.createElement('div');
+    div.className = 'swatch';
+    div.style.background = item.color;
+    const name = document.createElement('div');
+    name.textContent = item.label;
+    name.style.fontSize = '14px';
+    const btn = document.createElement('button');
+    btn.className = 'small';
+    btn.style.marginTop = '8px';
+    const unlocked = state.unlocked.includes(item.id);
+    if(unlocked){
+      btn.textContent = state.selectedColor === item.id ? 'Selected' : 'Select';
+      btn.disabled = (state.selectedColor === item.id);
+      btn.addEventListener('click', ()=>{
+        state.selectedColor = item.id;
+        saveToStorage();
+        renderShop();
+      });
+    } else {
+      btn.textContent = `Buy ${item.price}¢`;
+      btn.addEventListener('click', ()=>{
+        if(state.coins >= item.price){
+          state.coins -= item.price;
+          state.unlocked.push(item.id);
+          state.selectedColor = item.id;
+          saveToStorage();
+          uiUpdate();
+          renderShop();
+        } else {
+          alert('Not enough coins.');
+        }
+      });
+    }
+    // container
+    const container = document.createElement('div');
+    container.style.width = '120px';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.alignItems = 'center';
+    container.appendChild(div);
+    container.appendChild(name);
+    container.appendChild(btn);
+    shopGrid.appendChild(container);
+  });
+}
+
+/* ---------- Bow (mirrored) ---------- */
+/* We'll draw the bow as a mirrored semicircle (facing RIGHT) at bowX,bowY */
+function drawBow(){
+  ctx.save();
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = '#6b3';
+  // mirrored semicircle (right-facing)
+  ctx.beginPath();
+  // right facing semicircle from -PI/2 to PI/2
+  ctx.arc(state.bowX, state.bowY, 50, -Math.PI/2, Math.PI/2);
+  ctx.stroke();
+
+  // string (visual when dragging)
+  ctx.beginPath();
+  ctx.moveTo(state.bowX-0, state.bowY-45);
+  ctx.lineTo(state.bowX-0, state.bowY+45);
+  ctx.strokeStyle = '#6b3';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // small handle
+  ctx.fillStyle = '#6b3';
+  ctx.fillRect(state.bowX-6, state.bowY-8, 12, 16);
+
+  ctx.restore();
+}
+
+/* ---------- Target (moving up/down) ---------- */
+const targetOffsetX = 200;
+function calcTargetX(){ return canvas.width - targetOffsetX; }
+
+/* ---------- Arrows ---------- */
+function makeArrow(vx, vy){
+  return {
+    x: state.bowX + 60, // slightly in front of bow
+    y: state.bowY,
+    vx: vx, vy: vy, stuck:false, color: shopItems.find(i=>i.id===state.selectedColor)?.color || '#111'
+  };
+}
+
+function drawArrow(a){
+  if(a.stuck){
+    // draw small stuck triangle pointing right because target is to the right
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(0);
+    ctx.beginPath();
+    ctx.moveTo(-16, -4);
+    ctx.lineTo(6, 0);
+    ctx.lineTo(-16, 4);
+    ctx.closePath();
+    ctx.fillStyle = a.color;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  // simple rectangle body + triangle head
+  ctx.fillStyle = a.color;
+  ctx.fillRect(-10, -3, 20, 6);
+  ctx.beginPath();
+  ctx.moveTo(10,0);
+  ctx.lineTo(16,4);
+  ctx.lineTo(16,-4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/* ---------- Game Logic ---------- */
+let lastTime = performance.now();
+let targetBaseY = canvas.height/2;
+let targetAmp = Math.min(120, canvas.height/3);
+let targetSpeed = 1.2; // speed multiplier for sine oscillation
+function update(dt){
+  if(!state.running) return;
+
+  // Target moves: sine oscillation
+  const t = (Date.now() - state.gameStartTimestamp)/1000;
+  state.targetY = targetBaseY + Math.sin(t * targetSpeed) * targetAmp;
+  state.targetX = calcTargetX();
+
+  // Update arrows
+  for(let arrow of state.arrows){
+    if(arrow.stuck) continue;
+    arrow.x += arrow.vx * dt;
+    arrow.y += arrow.vy * dt;
+    // slight drag / gravity for realism
+    arrow.vy += 0.002 * dt * 60; // gentle gravity
+
+    // collision with target center
+    const dx = arrow.x - state.targetX;
+    const dy = arrow.y - state.targetY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if(!arrow.stuck && dist <= state.outerR){
+      arrow.stuck = true;
+      // award points based on radius
+      if(dist <= state.bullR) state.score += 50;
+      else if(dist <= state.middleR) state.score += 25;
+      else state.score += 10;
+      uiUpdate();
+    }
+
+    // if off screen to right, remove later (we'll keep for a bit)
+  }
+
+  // Timer countdown
+  state.timeLeft -= dt/1000;
+  if(state.timeLeft <= 0 && state.running){
+    endGame();
+  }
+
+  uiUpdate();
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Background ground
+  ctx.fillStyle = '#4aa34a';
+  ctx.fillRect(0, canvas.height - 80, canvas.width, 80);
+
+  // Draw target with rings (outer -> middle -> bull)
+  ctx.save();
+  // outer
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.outerR, 0, Math.PI*2);
+  ctx.fillStyle = '#b22222'; // red
+  ctx.fill();
+  // middle
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.middleR, 0, Math.PI*2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  // bull
+  ctx.beginPath();
+  ctx.arc(state.targetX, state.targetY, state.bullR, 0, Math.PI*2);
+  ctx.fillStyle = '#ffd700';
+  ctx.fill();
+  ctx.restore();
+
+  // Draw arrows
+  for(let a of state.arrows) drawArrow(a);
+
+  // Draw mirrored bow (right-facing)
+  drawBow();
+
+  // if dragging, draw aim line
+  if(state.dragging){
+    ctx.beginPath();
+    ctx.moveTo(state.bowX + 20, state.bowY);
+    ctx.lineTo(state.startX, state.startY);
+    ctx.strokeStyle = '#00000080';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+}
+
+/* ---------- Input (mouse + touch) ---------- */
+function getPointerPos(e){
+  const rect = canvas.getBoundingClientRect();
+  if(e.touches){
+    return {x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top};
+  } else {
+    return {x: e.clientX - rect.left, y: e.clientY - rect.top};
+  }
+}
+
+canvas.addEventListener('pointerdown', (e)=>{
+  if(!state.running) return;
+  state.dragging = true;
+  const p = getPointerPos(e);
+  state.startX = p.x;
+  state.startY = p.y;
+});
+canvas.addEventListener('pointerup', (e)=>{
+  if(!state.dragging || !state.running) return;
+  state.dragging = false;
+  const rect = canvas.getBoundingClientRect();
+  const endX = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
+  const endY = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - rect.top;
+
+  // calculate power vector (pull from bow toward pointer)
+  const dx = state.startX - endX;
+  const dy = state.startY - endY;
+  // scale factor tuned for responsive feel
+  const power = 0.18;
+  const vx = dx * power;
+  const vy = dy * power;
+  state.arrows.push(makeArrow(vx, vy));
+});
+canvas.addEventListener('pointercancel', ()=>{ state.dragging=false; });
+
+/* ---------- Game loop ---------- */
+function gameLoop(now){
+  const dt = Math.min(40, now - lastTime); // ms
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+/* ---------- Game start / end / reset ---------- */
+function startGame(){
+  state.score = 0;
+  state.arrows = [];
+  state.timeLeft = 30;
+  state.running = true;
+  state.gameStartTimestamp = Date.now();
+  // position bow vertically center to start
+  state.bowY = canvas.height/2;
+  targetBaseY = canvas.height/2;
+  targetAmp = Math.min(120, canvas.height/3);
+  uiUpdate();
+}
+function endGame(){
+  state.running = false;
+  // compute coins earned: +1 coin per 10 points
+  const earned = Math.floor(state.score / 10);
+  state.coins += earned;
+  // update high score
+  if(state.score > state.highScore){
+    state.highScore = state.score;
+  }
+  saveToStorage();
+  // show panel with game over
+  finalScore.textContent = state.score;
+  earnedCoinsEl.textContent = earned;
+  shopContent.style.display = 'none';
+  gameOverContent.style.display = 'block';
+  panel.classList.add('show');
+  uiUpdate();
+}
+function resetGame(){
+  startGame();
+}
+
+/* ---------- Initialize ---------- */
+startGame();
+requestAnimationFrame(gameLoop);
+
+/* Save periodically (and on visibility change/unload) */
+setInterval(saveToStorage, 3000);
+window.addEventListener('beforeunload', saveToStorage);
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') saveToStorage(); });
+
+/* Open shop on panel if user previously wants to view — render initial shop state */
+renderShop();
+
+/* Small niceties: tap bow to adjust vertical aim (on mobile) */
+canvas.addEventListener('click', (e)=>{
+  // if clicked on left quarter (bow area) allow reposition bow vertical
+  const p = getPointerPos(e);
+  if(p.x < canvas.width * 0.25){
+    state.bowY = p.y;
+  }
+});
+
+/* Expose restart shortcut (R) and open shop (S) */
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'r' || e.key === 'R') resetGame();
+  if(e.key === 's' || e.key === 'S') openShop();
+});
+</script>
+</body>
+</html>
